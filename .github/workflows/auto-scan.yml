@@ -1,0 +1,195 @@
+name: AI API Key Scanner - Auto Scan
+
+# 触发条件
+on:
+  # 定时触发 - 每天 UTC 时间 02:00 执行（北京时间 10:00）
+  schedule:
+    - cron: '0 2 * * *'  # 每天执行一次
+    # - cron: '0 */12 * * *'  # 每12小时执行一次
+    # - cron: '0 0 * * 0'  # 每周日执行一次
+  
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      scan_mode:
+        description: '扫描模式'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - user
+          - org
+      target:
+        description: '扫描目标（用户名或组织名，auto模式时可留空）'
+        required: false
+        type: string
+      max_repos:
+        description: '最大扫描仓库数'
+        required: false
+        default: '50'
+        type: string
+
+# 添加权限设置
+permissions:
+  contents: write  # 允许提交代码
+  issues: write    # 允许创建 Issue
+
+# 任务定义
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. 检出代码
+      - name: 📥 检出代码
+        uses: actions/checkout@v4
+      
+      # 2. 设置 Python 环境
+      - name: 🐍 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      # 3. 安装依赖
+      - name: 📦 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      # 4. 创建环境变量文件
+      - name: ⚙️ 配置环境变量
+        run: |
+          echo "GITHUB_TOKEN=${{ secrets.GH_SCAN_TOKEN }}" > .env
+          echo "OUTPUT_DIR=./scan_reports" >> .env
+      
+      # 5. 执行扫描（定时任务）
+      - name: 🔍 执行自动扫描
+        if: github.event_name == 'schedule'
+        run: |
+          python scan_github.py --auto --max-repos 50
+      
+      # 6. 执行扫描（手动触发 - auto模式）
+      - name: 🔍 执行扫描 (auto)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.scan_mode == 'auto'
+        run: |
+          python scan_github.py --auto --max-repos ${{ github.event.inputs.max_repos }}
+      
+      # 7. 执行扫描（手动触发 - user模式）
+      - name: 🔍 执行扫描 (user)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.scan_mode == 'user'
+        run: |
+          python scan_github.py --user ${{ github.event.inputs.target }}
+      
+      # 8. 执行扫描（手动触发 - org模式）
+      - name: 🔍 执行扫描 (org)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.scan_mode == 'org'
+        run: |
+          python scan_github.py --org ${{ github.event.inputs.target }}
+      
+      # 9. 上传扫描报告
+      - name: 📤 上传扫描报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-report-${{ github.run_number }}
+          path: scan_reports/
+          retention-days: 90
+          if-no-files-found: ignore
+      
+      # 10. 提交扫描历史和报告
+      - name: 💾 提交扫描历史和报告
+        if: always()
+        run: |
+          git config user.name "gaocaipeng"
+          git config user.email "2540225402@qq.com"
+          
+          # 添加扫描历史
+          git add scan_history/
+          
+          # 添加扫描报告
+          if [ -d "scan_reports" ] && [ "$(ls -A scan_reports 2>/dev/null)" ]; then
+            git add scan_reports/
+            echo "✅ 发现扫描报告，将一并提交"
+          fi
+          
+          # 检查是否有更改
+          if git diff --cached --quiet; then
+            echo "没有新的扫描历史或报告"
+          else
+            # 统计信息
+            HISTORY_CHANGED=$(git diff --cached --name-only | grep "scan_history/" | wc -l | tr -d ' ')
+            REPORTS_CHANGED=$(git diff --cached --name-only | grep "scan_reports/" | wc -l | tr -d ' ')
+            
+            # 提交消息
+            COMMIT_MSG="📝 更新扫描数据 [skip ci]"
+            if [ "$HISTORY_CHANGED" -gt 0 ] && [ "$REPORTS_CHANGED" -gt 0 ]; then
+              COMMIT_MSG="📝 更新扫描历史和报告 [skip ci]"
+            elif [ "$REPORTS_CHANGED" -gt 0 ]; then
+              COMMIT_MSG="📄 添加扫描报告 [skip ci]"
+            fi
+            
+            git commit -m "$COMMIT_MSG"
+            
+            # 同步远程更改，避免并发推送冲突
+            git pull --rebase origin main || {
+              echo "⚠️ Rebase 冲突，尝试使用本地版本"
+              git rebase --abort
+              git pull --rebase --strategy-option=ours origin main
+            }
+            
+            git push
+            echo "✅ 已提交: 历史文件 $HISTORY_CHANGED 个, 报告文件 $REPORTS_CHANGED 个"
+          fi
+      
+      # 11. 显示报告摘要
+      - name: 📊 显示扫描摘要
+        if: always()
+        run: |
+          if [ -d "scan_reports" ] && [ "$(ls -A scan_reports)" ]; then
+            echo "## 📋 扫描报告生成成功" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📁 报告文件:" >> $GITHUB_STEP_SUMMARY
+            ls -lh scan_reports/ >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📄 报告预览（前50行）:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            head -n 50 scan_reports/*.txt | tail -n 50 >> $GITHUB_STEP_SUMMARY || echo "无法读取报告内容" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ 未生成报告文件" >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      # 11. 可选：发送通知（如果发现问题）
+      - name: 🔔 检查是否发现问题
+        id: check_findings
+        run: |
+          if grep -q "发现的问题总数: [1-9]" scan_reports/*.txt 2>/dev/null; then
+            echo "有发现问题"
+            echo "has_findings=true" >> $GITHUB_OUTPUT
+          else
+            echo "未发现问题"
+            echo "has_findings=false" >> $GITHUB_OUTPUT
+          fi
+      
+      # 12. 可选：创建 Issue（如果发现高危问题）
+      - name: 📢 创建告警 Issue
+        if: steps.check_findings.outputs.has_findings == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportFiles = fs.readdirSync('scan_reports');
+            if (reportFiles.length > 0) {
+              const reportContent = fs.readFileSync(`scan_reports/${reportFiles[0]}`, 'utf8');
+              const lines = reportContent.split('\n').slice(0, 100).join('\n');
+              
+              github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `⚠️ 安全扫描发现潜在密钥泄露 - ${new Date().toISOString().split('T')[0]}`,
+                body: `# 🔍 自动扫描报告\n\n本次扫描发现潜在的 API 密钥泄露问题。\n\n**扫描时间**: ${new Date().toISOString()}\n**运行ID**: #${context.runNumber}\n\n## 📄 报告摘要\n\n\`\`\`\n${lines}\n\`\`\`\n\n完整报告请查看 [Artifacts](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                labels: ['security', 'auto-scan']
+              });
+            }
+

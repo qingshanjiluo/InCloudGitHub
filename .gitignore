@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+
+# Scan reports - 现在提交到仓库（私密仓库安全）
+# scan_reports/ - 不再忽略，需要提交到仓库
+# scan_reports/*.txt - 不再忽略
+
+# Scan history (keep this in repo for tracking)
+# scan_history/ - 不要忽略，需要提交到仓库
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+temp_repos/

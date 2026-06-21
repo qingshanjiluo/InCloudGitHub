@@ -1,0 +1,312 @@
+name: AI API Key Scanner - Scheduled Scan
+
+# 多种定时触发选项
+on:
+  schedule:
+    # 每天 UTC 02:00 (北京时间 10:00)
+    - cron: '0 2 * * *'
+    
+    # 也可以选择其他时间，取消注释即可：
+    # - cron: '0 */6 * * *'    # 每6小时一次
+    # - cron: '0 0,12 * * *'   # 每天 00:00 和 12:00
+    # - cron: '0 2 * * 1'      # 每周一 02:00
+    # - cron: '0 2 1 * *'      # 每月1号 02:00
+  
+  # 也支持手动触发
+  workflow_dispatch:
+
+# 并发控制 - 同一时间只运行一个扫描任务
+concurrency:
+  group: scheduled-scan
+  cancel-in-progress: false
+
+# 添加权限设置
+permissions:
+  contents: write  # 允许提交代码
+  issues: write    # 允许创建和更新 Issue
+
+jobs:
+  scheduled-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # 超时时间60分钟
+    
+    steps:
+      - name: 📅 显示执行时间
+        run: |
+          echo "🕐 当前时间（UTC）: $(date -u)"
+          echo "🕐 当前时间（北京）: $(TZ='Asia/Shanghai' date)"
+      
+      - name: 📥 检出代码
+        uses: actions/checkout@v4
+      
+      - name: 🐍 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: 📦 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: ⚙️ 配置环境
+        env:
+          GITHUB_SCAN_TOKEN: ${{ secrets.GH_SCAN_TOKEN }}
+        run: |
+          echo "GITHUB_TOKEN=${GITHUB_SCAN_TOKEN}" > .env
+          echo "OUTPUT_DIR=./scan_reports" >> .env
+          mkdir -p scan_reports
+      
+      - name: 🔍 执行定时扫描
+        id: scan
+        run: |
+          echo "开始执行自动扫描任务..."
+          python scan_github.py --auto --max-repos 50 2>&1 | tee scan.log
+          
+          # 记录扫描状态
+          if [ $? -eq 0 ]; then
+            echo "scan_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "scan_status=failed" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: 📊 分析扫描结果
+        id: analyze
+        if: always()
+        run: |
+          # 检查是否有报告生成
+          if [ -d "scan_reports" ] && [ "$(ls -A scan_reports)" ]; then
+            REPORT_FILE=$(ls -t scan_reports/*.txt | head -1)
+            
+            # 提取发现的问题数
+            TOTAL=$(grep "发现的问题总数:" "$REPORT_FILE" | grep -oE '[0-9]+' || echo "0")
+            HIGH=$(grep "高置信度:" "$REPORT_FILE" | grep -oE '[0-9]+' || echo "0")
+            MEDIUM=$(grep "中置信度:" "$REPORT_FILE" | grep -oE '[0-9]+' || echo "0")
+            
+            echo "total_findings=$TOTAL" >> $GITHUB_OUTPUT
+            echo "high_confidence=$HIGH" >> $GITHUB_OUTPUT
+            echo "medium_confidence=$MEDIUM" >> $GITHUB_OUTPUT
+            
+            echo "📊 扫描结果统计:"
+            echo "  - 总问题数: $TOTAL"
+            echo "  - 高置信度: $HIGH"
+            echo "  - 中置信度: $MEDIUM"
+            
+            # 判断是否需要告警
+            if [ "$TOTAL" -gt 0 ]; then
+              echo "needs_alert=true" >> $GITHUB_OUTPUT
+            else
+              echo "needs_alert=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "⚠️ 未找到扫描报告"
+            echo "total_findings=0" >> $GITHUB_OUTPUT
+            echo "needs_alert=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: 📝 生成摘要
+        if: always()
+        run: |
+          echo "# 🔍 定时扫描报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**执行时间**: $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "**扫描模式**: 自动搜索 AI 相关项目" >> $GITHUB_STEP_SUMMARY
+          echo "**扫描状态**: ${{ steps.scan.outputs.scan_status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 检查是否存在 txt 文件
+          if ls scan_reports/*.txt 1> /dev/null 2>&1; then
+            echo "## 📊 扫描统计" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- 🔴 高置信度问题: ${{ steps.analyze.outputs.high_confidence }}" >> $GITHUB_STEP_SUMMARY
+            echo "- 🟡 中置信度问题: ${{ steps.analyze.outputs.medium_confidence }}" >> $GITHUB_STEP_SUMMARY
+            echo "- 📦 总问题数: ${{ steps.analyze.outputs.total_findings }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            echo "## 📄 报告预览" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            head -n 100 scan_reports/*.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: 📤 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-scan-${{ github.run_number }}
+          path: |
+            scan_reports/
+            scan.log
+          retention-days: 90
+          if-no-files-found: ignore
+      
+      - name: 💾 提交扫描历史和报告
+        if: always()
+        run: |
+          git config user.name "gaocaipeng"
+          git config user.email "2540225402@qq.com"
+          
+          # 添加扫描历史
+          git add scan_history/
+          
+          # 添加扫描报告
+          if [ -d "scan_reports" ] && [ "$(ls -A scan_reports 2>/dev/null)" ]; then
+            git add scan_reports/
+            echo "✅ 发现扫描报告，将一并提交"
+          fi
+          
+          # 检查是否有更改
+          if git diff --cached --quiet; then
+            echo "没有新的扫描历史或报告"
+          else
+            # 统计信息
+            HISTORY_CHANGED=$(git diff --cached --name-only | grep "scan_history/" | wc -l | tr -d ' ')
+            REPORTS_CHANGED=$(git diff --cached --name-only | grep "scan_reports/" | wc -l | tr -d ' ')
+            
+            # 提交消息
+            COMMIT_MSG="📝 更新扫描数据 [skip ci]"
+            if [ "$HISTORY_CHANGED" -gt 0 ] && [ "$REPORTS_CHANGED" -gt 0 ]; then
+              COMMIT_MSG="📝 更新扫描历史和报告 [skip ci]"
+            elif [ "$REPORTS_CHANGED" -gt 0 ]; then
+              COMMIT_MSG="📄 添加扫描报告 [skip ci]"
+            fi
+            
+            git commit -m "$COMMIT_MSG"
+            
+            # 同步远程更改，避免并发推送冲突
+            git pull --rebase origin main || {
+              echo "⚠️ Rebase 冲突，尝试使用本地版本"
+              git rebase --abort
+              git pull --rebase --strategy-option=ours origin main
+            }
+            
+            git push
+            echo "✅ 已提交: 历史文件 $HISTORY_CHANGED 个, 报告文件 $REPORTS_CHANGED 个"
+          fi
+      
+      - name: 🚨 创建告警Issue（发现问题时）
+        if: steps.analyze.outputs.needs_alert == 'true'
+        uses: actions/github-script@v7
+        env:
+          TOTAL_FINDINGS: ${{ steps.analyze.outputs.total_findings }}
+          HIGH_CONFIDENCE: ${{ steps.analyze.outputs.high_confidence }}
+          MEDIUM_CONFIDENCE: ${{ steps.analyze.outputs.medium_confidence }}
+        with:
+          script: |
+            const fs = require('fs');
+            const reportFiles = fs.readdirSync('scan_reports');
+            
+            if (reportFiles.length > 0) {
+              const reportPath = `scan_reports/${reportFiles[0]}`;
+              const content = fs.readFileSync(reportPath, 'utf8');
+              const preview = content.split('\n').slice(0, 150).join('\n');
+              
+              const total = process.env.TOTAL_FINDINGS;
+              const high = process.env.HIGH_CONFIDENCE;
+              const medium = process.env.MEDIUM_CONFIDENCE;
+              
+              // 检查是否已存在今天的issue
+              const today = new Date().toISOString().split('T')[0];
+              const existingIssues = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: 'auto-scan,security',
+                state: 'open'
+              });
+              
+              const todayIssue = existingIssues.data.find(issue => 
+                issue.title.includes(today)
+              );
+              
+              if (todayIssue) {
+                // 更新现有issue
+                const updateBody = [
+                  '## 🔄 更新：新的扫描发现',
+                  '',
+                  `扫描时间: ${new Date().toLocaleString('zh-CN')}`,
+                  `运行: [#${context.runNumber}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                  '',
+                  '### 📊 本次扫描统计',
+                  `- 🔴 高置信度: ${high}`,
+                  `- 🟡 中置信度: ${medium}`,
+                  `- 📦 总计: ${total}`,
+                  '',
+                  '完整报告请查看 Artifacts。'
+                ].join('\n');
+                
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: todayIssue.number,
+                  body: updateBody
+                });
+              } else {
+                // 创建新issue
+                const highWarning = high > 0 ? '⚠️ 需立即处理' : '';
+                const mediumWarning = medium > 0 ? '⚠️ 建议审查' : '';
+                
+                const issueTitle = `🚨 [${today}] 安全扫描发现 ${total} 个潜在密钥泄露`;
+                const issueBody = [
+                  '# 🔍 自动扫描告警',
+                  '',
+                  '## 📋 扫描信息',
+                  '',
+                  `- 扫描日期: ${today}`,
+                  `- 执行时间: ${new Date().toLocaleString('zh-CN')}`,
+                  `- Workflow: [Run #${context.runNumber}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                  '',
+                  '## 📊 发现问题统计',
+                  '',
+                  `- 🔴 高置信度: ${high} 个 ${highWarning}`,
+                  `- 🟡 中置信度: ${medium} 个 ${mediumWarning}`,
+                  `- 📦 总计: ${total} 个`,
+                  '',
+                  '## 📄 报告预览',
+                  '',
+                  '```',
+                  preview,
+                  '```',
+                  '',
+                  '## 🔗 完整报告',
+                  '',
+                  `请从 [Artifacts](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) 下载完整的扫描报告。`,
+                  '',
+                  '## ⚠️ 建议的处理步骤',
+                  '',
+                  '1. 立即审查：检查所有高置信度的发现',
+                  '2. 轮换密钥：对于确认泄露的密钥，立即在服务商处轮换',
+                  '3. 清理历史：使用 git-filter-repo 或 BFG 清理 Git 历史',
+                  '4. 防范措施：',
+                  '   - 使用环境变量存储敏感信息',
+                  '   - 更新 .gitignore 文件',
+                  '   - 配置 pre-commit hooks',
+                  '   - 启用 GitHub Secret Scanning',
+                  '',
+                  '## 📅 后续扫描',
+                  '',
+                  '下次自动扫描将在明天同一时间执行。',
+                  '',
+                  '---',
+                  `*🤖 此 Issue 由 GitHub Actions 自动创建 - [查看工作流](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/.github/workflows/scheduled-scan.yml)*`
+                ].join('\n');
+                
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: issueTitle,
+                  body: issueBody,
+                  labels: ['security', 'auto-scan', 'needs-review'],
+                  assignees: []
+                });
+              }
+            }
+      
+      - name: ✅ 扫描完成
+        if: always()
+        run: |
+          if [ "${{ steps.analyze.outputs.total_findings }}" -gt 0 ]; then
+            echo "⚠️ 扫描完成，发现 ${{ steps.analyze.outputs.total_findings }} 个潜在问题"
+            echo "请查看生成的 Issue 和 Artifacts 中的详细报告"
+          else
+            echo "✅ 扫描完成，未发现明显问题"
+          fi
