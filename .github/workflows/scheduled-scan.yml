@@ -57,11 +57,11 @@ jobs:
           echo "OUTPUT_DIR=./scan_reports" >> .env
           mkdir -p scan_reports
       
-      - name: 🔍 执行定时扫描
+      - name: 🔍 执行定时扫描（新仓库优先）
         id: scan
         run: |
-          echo "开始执行自动扫描任务..."
-          python scan_github.py --auto --max-repos 50 2>&1 | tee scan.log
+          echo "开始执行自动扫描任务（新仓库优先策略）..."
+          python scan_github.py --auto --max-repos 50 --sort-by updated 2>&1 | tee scan.log
           
           # 记录扫描状态
           if [ $? -eq 0 ]; then
@@ -76,26 +76,32 @@ jobs:
         run: |
           # 检查是否有报告生成
           if [ -d "scan_reports" ] && [ "$(ls -A scan_reports)" ]; then
-            REPORT_FILE=$(ls -t scan_reports/*.txt | head -1)
+            REPORT_FILE=$(ls -t scan_reports/scan_report_*.txt 2>/dev/null | head -1)
             
-            # 提取发现的问题数
-            TOTAL=$(grep "发现的问题总数:" "$REPORT_FILE" | grep -oE '[0-9]+' || echo "0")
-            HIGH=$(grep "高置信度:" "$REPORT_FILE" | grep -oE '[0-9]+' || echo "0")
-            MEDIUM=$(grep "中置信度:" "$REPORT_FILE" | grep -oE '[0-9]+' || echo "0")
-            
-            echo "total_findings=$TOTAL" >> $GITHUB_OUTPUT
-            echo "high_confidence=$HIGH" >> $GITHUB_OUTPUT
-            echo "medium_confidence=$MEDIUM" >> $GITHUB_OUTPUT
-            
-            echo "📊 扫描结果统计:"
-            echo "  - 总问题数: $TOTAL"
-            echo "  - 高置信度: $HIGH"
-            echo "  - 中置信度: $MEDIUM"
-            
-            # 判断是否需要告警
-            if [ "$TOTAL" -gt 0 ]; then
-              echo "needs_alert=true" >> $GITHUB_OUTPUT
+            if [ -n "$REPORT_FILE" ]; then
+              # 提取发现的问题数
+              TOTAL=$(grep "发现的问题总数:" "$REPORT_FILE" | grep -oE '[0-9]+' || echo "0")
+              HIGH=$(grep "高置信度:" "$REPORT_FILE" | grep -oE '[0-9]+' || echo "0")
+              MEDIUM=$(grep "中置信度:" "$REPORT_FILE" | grep -oE '[0-9]+' || echo "0")
+              
+              echo "total_findings=$TOTAL" >> $GITHUB_OUTPUT
+              echo "high_confidence=$HIGH" >> $GITHUB_OUTPUT
+              echo "medium_confidence=$MEDIUM" >> $GITHUB_OUTPUT
+              
+              echo "📊 扫描结果统计:"
+              echo "  - 总问题数: $TOTAL"
+              echo "  - 高置信度: $HIGH"
+              echo "  - 中置信度: $MEDIUM"
+              
+              # 判断是否需要告警
+              if [ "$TOTAL" -gt 0 ]; then
+                echo "needs_alert=true" >> $GITHUB_OUTPUT
+              else
+                echo "needs_alert=false" >> $GITHUB_OUTPUT
+              fi
             else
+              echo "⚠️ 未找到扫描报告文件"
+              echo "total_findings=0" >> $GITHUB_OUTPUT
               echo "needs_alert=false" >> $GITHUB_OUTPUT
             fi
           else
@@ -110,12 +116,12 @@ jobs:
           echo "# 🔍 定时扫描报告" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**执行时间**: $(date)" >> $GITHUB_STEP_SUMMARY
-          echo "**扫描模式**: 自动搜索 AI 相关项目" >> $GITHUB_STEP_SUMMARY
+          echo "**扫描模式**: 自动搜索 AI 相关项目（新仓库优先）" >> $GITHUB_STEP_SUMMARY
           echo "**扫描状态**: ${{ steps.scan.outputs.scan_status }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # 检查是否存在 txt 文件
-          if ls scan_reports/*.txt 1> /dev/null 2>&1; then
+          # 检查是否存在 scan_report 文件
+          if ls scan_reports/scan_report_*.txt 1> /dev/null 2>&1; then
             echo "## 📊 扫描统计" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "- 🔴 高置信度问题: ${{ steps.analyze.outputs.high_confidence }}" >> $GITHUB_STEP_SUMMARY
@@ -125,8 +131,28 @@ jobs:
             
             echo "## 📄 报告预览" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            head -n 100 scan_reports/*.txt >> $GITHUB_STEP_SUMMARY
+            head -n 100 scan_reports/scan_report_*.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      # 🔑 显示密钥报告（完整密钥，不脱敏）
+      - name: 🔑 显示密钥与 URL 报告
+        if: always()
+        run: |
+          echo "## 🔑 密钥与 URL 报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> 以下为本次扫描发现的完整密钥及其对应的 Base URL 和模型信息" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          KEYS_REPORT=$(ls -t scan_reports/keys_report_*.txt 2>/dev/null | head -1)
+          if [ -n "$KEYS_REPORT" ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat "$KEYS_REPORT" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **警告**: 此报告包含完整密钥，请勿公开分享！" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "本次扫描未发现 SK 密钥（sk-... 或 AIza... 格式）" >> $GITHUB_STEP_SUMMARY
           fi
       
       - name: 📤 上传报告
@@ -174,10 +200,10 @@ jobs:
             git commit -m "$COMMIT_MSG"
             
             # 同步远程更改，避免并发推送冲突
-            git pull --rebase origin main || {
+            git pull --rebase origin master || {
               echo "⚠️ Rebase 冲突，尝试使用本地版本"
               git rebase --abort
-              git pull --rebase --strategy-option=ours origin main
+              git pull --rebase --strategy-option=ours origin master
             }
             
             git push
@@ -194,7 +220,7 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const reportFiles = fs.readdirSync('scan_reports');
+            const reportFiles = fs.readdirSync('scan_reports').filter(f => f.startsWith('scan_report_'));
             
             if (reportFiles.length > 0) {
               const reportPath = `scan_reports/${reportFiles[0]}`;
@@ -214,7 +240,7 @@ jobs:
                 state: 'open'
               });
               
-              const todayIssue = existingIssues.data.find(issue => 
+              const todayIssue = existingIssues.data.find(issue =>
                 issue.title.includes(today)
               );
               
@@ -287,7 +313,7 @@ jobs:
                   '下次自动扫描将在明天同一时间执行。',
                   '',
                   '---',
-                  `*🤖 此 Issue 由 GitHub Actions 自动创建 - [查看工作流](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/.github/workflows/scheduled-scan.yml)*`
+                  `*🤖 此 Issue 由 GitHub Actions 自动创建 - [查看工作流](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/master/.github/workflows/scheduled-scan.yml)*`
                 ].join('\n');
                 
                 await github.rest.issues.create({

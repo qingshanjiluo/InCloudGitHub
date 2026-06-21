@@ -121,6 +121,14 @@ class CloudScanner:
             scan_type=f"user:{username}"
         )
 
+        # 生成密钥报告（完整密钥，不脱敏）
+        keys_report_path = self.report_generator.generate_keys_report(
+            all_findings,
+            scan_start_time,
+            scan_type=f"user:{username}"
+        )
+        print(f"🔑 密钥报告已保存至: {keys_report_path}")
+
         # 打印摘要
         summary = self.report_generator.generate_summary(report_path, len(all_findings))
         print(summary)
@@ -187,6 +195,14 @@ class CloudScanner:
             scan_type=f"org:{org_name}"
         )
 
+        # 生成密钥报告（完整密钥，不脱敏）
+        keys_report_path = self.report_generator.generate_keys_report(
+            all_findings,
+            scan_start_time,
+            scan_type=f"org:{org_name}"
+        )
+        print(f"🔑 密钥报告已保存至: {keys_report_path}")
+
         # 打印摘要
         summary = self.report_generator.generate_summary(report_path, len(all_findings))
         print(summary)
@@ -242,6 +258,14 @@ class CloudScanner:
             scan_type="auto:ai-projects"
         )
 
+        # 生成密钥报告（完整密钥，不脱敏）
+        keys_report_path = self.report_generator.generate_keys_report(
+            all_findings,
+            scan_start_time,
+            scan_type="auto:ai-projects"
+        )
+        print(f"🔑 密钥报告已保存至: {keys_report_path}")
+
         # 打印摘要
         summary = self.report_generator.generate_summary(report_path, len(all_findings))
         print(summary)
@@ -281,6 +305,14 @@ class CloudScanner:
             scan_start_time,
             scan_type=f"single:{repo_full_name}"
         )
+
+        # 生成密钥报告（完整密钥，不脱敏）
+        keys_report_path = self.report_generator.generate_keys_report(
+            findings,
+            scan_start_time,
+            scan_type=f"single:{repo_full_name}"
+        )
+        print(f"🔑 密钥报告已保存至: {keys_report_path}")
 
         # 打印摘要
         summary = self.report_generator.generate_summary(report_path, len(findings))

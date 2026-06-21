@@ -63,29 +63,29 @@ jobs:
           echo "GITHUB_TOKEN=${{ secrets.GH_SCAN_TOKEN }}" > .env
           echo "OUTPUT_DIR=./scan_reports" >> .env
       
-      # 5. 执行扫描（定时任务）
+      # 5. 执行扫描（定时任务）- 使用新仓库优先策略
       - name: 🔍 执行自动扫描
         if: github.event_name == 'schedule'
         run: |
-          python scan_github.py --auto --max-repos 50
+          python scan_github.py --auto --max-repos 50 --sort-by updated
       
       # 6. 执行扫描（手动触发 - auto模式）
       - name: 🔍 执行扫描 (auto)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.scan_mode == 'auto'
         run: |
-          python scan_github.py --auto --max-repos ${{ github.event.inputs.max_repos }}
+          python scan_github.py --auto --max-repos ${{ github.event.inputs.max_repos }} --sort-by updated
       
       # 7. 执行扫描（手动触发 - user模式）
       - name: 🔍 执行扫描 (user)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.scan_mode == 'user'
         run: |
-          python scan_github.py --user ${{ github.event.inputs.target }}
+          python scan_github.py --user "${{ github.event.inputs.target }}" --sort-by updated
       
       # 8. 执行扫描（手动触发 - org模式）
       - name: 🔍 执行扫描 (org)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.scan_mode == 'org'
         run: |
-          python scan_github.py --org ${{ github.event.inputs.target }}
+          python scan_github.py --org "${{ github.event.inputs.target }}" --sort-by updated
       
       # 9. 上传扫描报告
       - name: 📤 上传扫描报告
@@ -132,10 +132,10 @@ jobs:
             git commit -m "$COMMIT_MSG"
             
             # 同步远程更改，避免并发推送冲突
-            git pull --rebase origin main || {
+            git pull --rebase origin master || {
               echo "⚠️ Rebase 冲突，尝试使用本地版本"
               git rebase --abort
-              git pull --rebase --strategy-option=ours origin main
+              git pull --rebase --strategy-option=ours origin master
             }
             
             git push
@@ -154,17 +154,37 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### 📄 报告预览（前50行）:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            head -n 50 scan_reports/*.txt | tail -n 50 >> $GITHUB_STEP_SUMMARY || echo "无法读取报告内容" >> $GITHUB_STEP_SUMMARY
+            head -n 50 scan_reports/scan_report_*.txt | tail -n 50 >> $GITHUB_STEP_SUMMARY || echo "无法读取报告内容" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           else
             echo "⚠️ 未生成报告文件" >> $GITHUB_STEP_SUMMARY
           fi
       
-      # 11. 可选：发送通知（如果发现问题）
+      # 12. 🔑 显示密钥报告（完整密钥，不脱敏）
+      - name: 🔑 显示密钥与 URL 报告
+        if: always()
+        run: |
+          echo "## 🔑 密钥与 URL 报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> 以下为本次扫描发现的完整密钥及其对应的 Base URL 和模型信息" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          KEYS_REPORT=$(ls -t scan_reports/keys_report_*.txt 2>/dev/null | head -1)
+          if [ -n "$KEYS_REPORT" ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat "$KEYS_REPORT" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **警告**: 此报告包含完整密钥，请勿公开分享！" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "本次扫描未发现 SK 密钥（sk-... 或 AIza... 格式）" >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      # 13. 可选：发送通知（如果发现问题）
       - name: 🔔 检查是否发现问题
         id: check_findings
         run: |
-          if grep -q "发现的问题总数: [1-9]" scan_reports/*.txt 2>/dev/null; then
+          if grep -q "发现的问题总数: [1-9]" scan_reports/scan_report_*.txt 2>/dev/null; then
             echo "有发现问题"
             echo "has_findings=true" >> $GITHUB_OUTPUT
           else
@@ -172,14 +192,14 @@ jobs:
             echo "has_findings=false" >> $GITHUB_OUTPUT
           fi
       
-      # 12. 可选：创建 Issue（如果发现高危问题）
+      # 14. 可选：创建 Issue（如果发现高危问题）
       - name: 📢 创建告警 Issue
         if: steps.check_findings.outputs.has_findings == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const reportFiles = fs.readdirSync('scan_reports');
+            const reportFiles = fs.readdirSync('scan_reports').filter(f => f.startsWith('scan_report_'));
             if (reportFiles.length > 0) {
               const reportContent = fs.readFileSync(`scan_reports/${reportFiles[0]}`, 'utf8');
               const lines = reportContent.split('\n').slice(0, 100).join('\n');

@@ -64,20 +64,20 @@ jobs:
       - name: 🔍 执行扫描 - Auto模式
         if: startsWith(github.event.inputs.scan_type, 'auto')
         run: |
-          echo "执行自动扫描，最多扫描 ${{ github.event.inputs.max_repos }} 个仓库"
-          python scan_github.py --auto --max-repos ${{ github.event.inputs.max_repos }}
+          echo "执行自动扫描，最多扫描 ${{ github.event.inputs.max_repos }} 个仓库（新仓库优先）"
+          python scan_github.py --auto --max-repos ${{ github.event.inputs.max_repos }} --sort-by updated
       
       - name: 🔍 执行扫描 - User模式
         if: startsWith(github.event.inputs.scan_type, 'user')
         run: |
-          echo "扫描用户: ${{ github.event.inputs.target }}"
-          python scan_github.py --user "${{ github.event.inputs.target }}"
+          echo "扫描用户: ${{ github.event.inputs.target }}（新仓库优先）"
+          python scan_github.py --user "${{ github.event.inputs.target }}" --sort-by updated
       
       - name: 🔍 执行扫描 - Org模式
         if: startsWith(github.event.inputs.scan_type, 'org')
         run: |
-          echo "扫描组织: ${{ github.event.inputs.target }}"
-          python scan_github.py --org "${{ github.event.inputs.target }}"
+          echo "扫描组织: ${{ github.event.inputs.target }}（新仓库优先）"
+          python scan_github.py --org "${{ github.event.inputs.target }}" --sort-by updated
       
       - name: 🔍 执行扫描 - Repo模式
         if: startsWith(github.event.inputs.scan_type, 'repo')
@@ -95,11 +95,31 @@ jobs:
           echo "**执行时间**: $(date)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ -f scan_reports/*.txt ]; then
+          if ls scan_reports/scan_report_*.txt 1> /dev/null 2>&1; then
             echo "## 📄 扫描结果" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            head -n 80 scan_reports/*.txt >> $GITHUB_STEP_SUMMARY
+            head -n 80 scan_reports/scan_report_*.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      # 🔑 显示密钥报告（完整密钥，不脱敏）
+      - name: 🔑 显示密钥与 URL 报告
+        if: always()
+        run: |
+          echo "## 🔑 密钥与 URL 报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> 以下为本次扫描发现的完整密钥及其对应的 Base URL 和模型信息" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          KEYS_REPORT=$(ls -t scan_reports/keys_report_*.txt 2>/dev/null | head -1)
+          if [ -n "$KEYS_REPORT" ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat "$KEYS_REPORT" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **警告**: 此报告包含完整密钥，请勿公开分享！" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "本次扫描未发现 SK 密钥（sk-... 或 AIza... 格式）" >> $GITHUB_STEP_SUMMARY
           fi
       
       - name: 📤 上传报告
@@ -145,10 +165,10 @@ jobs:
             git commit -m "$COMMIT_MSG"
             
             # 同步远程更改，避免并发推送冲突
-            git pull --rebase origin main || {
+            git pull --rebase origin master || {
               echo "⚠️ Rebase 冲突，尝试使用本地版本"
               git rebase --abort
-              git pull --rebase --strategy-option=ours origin main
+              git pull --rebase --strategy-option=ours origin master
             }
             
             git push
@@ -159,8 +179,8 @@ jobs:
         id: analyze
         if: always()
         run: |
-          if [ -f scan_reports/*.txt ]; then
-            FINDINGS=$(grep "发现的问题总数:" scan_reports/*.txt | grep -oE '[0-9]+' || echo "0")
+          if ls scan_reports/scan_report_*.txt 1> /dev/null 2>&1; then
+            FINDINGS=$(grep "发现的问题总数:" scan_reports/scan_report_*.txt | grep -oE '[0-9]+' || echo "0")
             echo "发现 $FINDINGS 个潜在问题"
             echo "findings_count=$FINDINGS" >> $GITHUB_OUTPUT
             
@@ -176,8 +196,8 @@ jobs:
       
       - name: 📢 创建告警Issue
         if: |
-          always() && 
-          github.event.inputs.create_issue == 'true' && 
+          always() &&
+          github.event.inputs.create_issue == 'true' &&
           steps.analyze.outputs.has_findings == 'true'
         uses: actions/github-script@v7
         env:
@@ -193,7 +213,7 @@ jobs:
             const scanTarget = process.env.SCAN_TARGET;
             
             if (fs.existsSync(reportDir)) {
-              const files = fs.readdirSync(reportDir);
+              const files = fs.readdirSync(reportDir).filter(f => f.startsWith('scan_report_'));
               if (files.length > 0) {
                 const reportPath = `${reportDir}/${files[0]}`;
                 const content = fs.readFileSync(reportPath, 'utf8');

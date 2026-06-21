@@ -2,8 +2,9 @@
 报告生成模块
 """
 import os
+import json
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 from config import OUTPUT_DIR
 
 
@@ -19,6 +20,200 @@ class ReportGenerator:
         """
         self.output_dir = output_dir
         self._ensure_output_dir()
+
+    def generate_keys_report(self,
+                             scan_results: List[Dict],
+                             scan_start_time: datetime,
+                             scan_type: str = "auto") -> str:
+        """
+        生成密钥报告 - 直接输出完整密钥（不脱敏）及其对应的 Base URL 和模型信息
+
+        Args:
+            scan_results: 扫描结果列表
+            scan_start_time: 扫描开始时间
+            scan_type: 扫描类型
+
+        Returns:
+            密钥报告文件路径
+        """
+        report_time = datetime.now()
+        timestamp = report_time.strftime("%Y%m%d_%H%M%S")
+        filename = f"keys_report_{timestamp}.txt"
+        filepath = os.path.join(self.output_dir, filename)
+
+        # 过滤出包含 sk_analysis 的发现（即 SK 密钥）
+        sk_findings = [r for r in scan_results if 'sk_analysis' in r]
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write("╔" + "═" * 78 + "╗\n")
+            f.write("║" + " " * 78 + "║\n")
+            f.write("║" + "          🔑 InCloud GitHub - SK 密钥与 URL 报告（完整密钥）".ljust(78) + "║\n")
+            f.write("║" + " " * 78 + "║\n")
+            f.write("╚" + "═" * 78 + "╝\n\n")
+
+            # 扫描信息
+            duration = (report_time - scan_start_time).total_seconds()
+            duration_str = f"{int(duration // 60)}分{int(duration % 60)}秒" if duration >= 60 else f"{int(duration)}秒"
+
+            f.write("📋 扫描信息\n")
+            f.write("━" * 80 + "\n")
+            f.write(f"  🎯 扫描类型:     {self._format_scan_type(scan_type)}\n")
+            f.write(f"  ⏱️  开始时间:     {scan_start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"  ⏱️  结束时间:     {report_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"  ⏳ 扫描耗时:     {duration_str}\n")
+            f.write(f"  🔑 发现 SK 密钥: {len(sk_findings)} 个\n")
+            f.write(f"  📦 涉及仓库数:   {len(set(r.get('repo_url') for r in sk_findings))} 个\n")
+            f.write("\n")
+
+            if not sk_findings:
+                f.write("⚠️ 本次扫描未发现 SK 密钥（sk-... 或 AIza... 格式）\n\n")
+                f.write("💡 可能的原因：\n")
+                f.write("  1. 扫描的仓库中没有硬编码的 API 密钥\n")
+                f.write("  2. 密钥使用了环境变量引用，未直接出现在代码中\n")
+                f.write("  3. 密钥已被清理或轮换\n\n")
+            else:
+                # 按仓库分组
+                results_by_repo = self._group_by_repo(sk_findings)
+
+                for repo_url, findings in results_by_repo.items():
+                    repo_name = repo_url.split('/')[-2:] if '/' in repo_url else [repo_url]
+                    repo_name = '/'.join(repo_name) if len(repo_name) == 2 else repo_url
+
+                    f.write("╭" + "─" * 78 + "╮\n")
+                    f.write(f"│ 📦 仓库: {repo_name}".ljust(80) + "│\n")
+                    f.write(f"│ 🔗 地址: {repo_url}".ljust(80) + "│\n")
+                    f.write(f"│ 🔑 发现 {len(findings)} 个密钥".ljust(80) + "│\n")
+                    f.write("╰" + "─" * 78 + "╯\n\n")
+
+                    for idx, finding in enumerate(findings, 1):
+                        secret = finding.get('secret', '')
+                        secret_type = self._identify_secret_type(secret)
+                        sk_analysis = finding.get('sk_analysis', {})
+
+                        f.write(f"  ┌─ 密钥 #{idx} {'─' * 66}\n")
+                        f.write(f"  │\n")
+                        f.write(f"  │ 🔑 密钥类型: {secret_type}\n")
+                        f.write(f"  │ 🔐 完整密钥: {secret}\n")  # 完整密钥，不脱敏！
+                        f.write(f"  │\n")
+
+                        # 文件信息
+                        file_path = finding.get('file_path', 'N/A')
+                        f.write(f"  │ 📄 文件路径: {file_path}\n")
+                        if finding.get('line_number'):
+                            f.write(f"  │ 📍 行号: {finding['line_number']}\n")
+
+                        # SK 分析信息
+                        providers = sk_analysis.get('providers', [])
+                        base_urls = sk_analysis.get('base_urls', [])
+                        models = sk_analysis.get('models', [])
+
+                        if providers:
+                            f.write(f"  │\n")
+                            f.write(f"  │ 🏢 推断服务商: {', '.join(providers)}\n")
+                        if base_urls:
+                            f.write(f"  │ 🌐 推断 Base URL:\n")
+                            for url in base_urls:
+                                f.write(f"  │    {url}\n")
+                        if models:
+                            f.write(f"  │ 🤖 推断可用模型:\n")
+                            for model in models[:10]:
+                                f.write(f"  │    • {model}\n")
+                            if len(models) > 10:
+                                f.write(f"  │    ... 还有 {len(models) - 10} 个\n")
+
+                        # 代码上下文
+                        if finding.get('line_content'):
+                            line_content = finding['line_content'].strip()[:120]
+                            f.write(f"  │\n")
+                            f.write(f"  │ 💻 代码片段:\n")
+                            f.write(f"  │    {line_content}\n")
+
+                        f.write(f"  │\n")
+                        f.write(f"  └{'─' * 74}\n\n")
+
+                # ===== 汇总统计 =====
+                f.write("\n╔" + "═" * 78 + "╗\n")
+                f.write("║" + " " * 78 + "║\n")
+                f.write("║" + "                           📊 密钥汇总统计".ljust(78) + "║\n")
+                f.write("║" + " " * 78 + "║\n")
+                f.write("╚" + "═" * 78 + "╝\n\n")
+
+                # 按服务商汇总
+                provider_keys = {}
+                for r in sk_findings:
+                    analysis = r.get('sk_analysis', {})
+                    for p in analysis.get('providers', []):
+                        if p not in provider_keys:
+                            provider_keys[p] = []
+                        provider_keys[p].append(r.get('secret', ''))
+
+                if provider_keys:
+                    f.write("┌─ 按服务商汇总\n")
+                    f.write("│\n")
+                    for p, keys in sorted(provider_keys.items(), key=lambda x: len(x[1]), reverse=True):
+                        f.write(f"│  🏢 {p}: {len(keys)} 个密钥\n")
+                        for k in keys:
+                            f.write(f"│    🔑 {k}\n")
+                    f.write("│\n")
+                    f.write("└" + "─" * 78 + "\n\n")
+
+                # 按 Base URL 汇总
+                url_keys = {}
+                for r in sk_findings:
+                    analysis = r.get('sk_analysis', {})
+                    for url in analysis.get('base_urls', []):
+                        if url not in url_keys:
+                            url_keys[url] = []
+                        url_keys[url].append(r.get('secret', ''))
+
+                if url_keys:
+                    f.write("┌─ 按 Base URL 汇总\n")
+                    f.write("│\n")
+                    for url, keys in sorted(url_keys.items(), key=lambda x: len(x[1]), reverse=True):
+                        f.write(f"│  🌐 {url}\n")
+                        for k in keys:
+                            f.write(f"│    🔑 {k}\n")
+                    f.write("│\n")
+                    f.write("└" + "─" * 78 + "\n\n")
+
+                # JSON 格式导出（便于程序解析）
+                f.write("\n╔" + "═" * 78 + "╗\n")
+                f.write("║" + " " * 78 + "║\n")
+                f.write("║" + "                           📋 JSON 格式导出".ljust(78) + "║\n")
+                f.write("║" + " " * 78 + "║\n")
+                f.write("╚" + "═" * 78 + "╝\n\n")
+
+                json_data = []
+                for r in sk_findings:
+                    analysis = r.get('sk_analysis', {})
+                    entry = {
+                        "secret": r.get('secret', ''),
+                        "secret_type": self._identify_secret_type(r.get('secret', '')),
+                        "repo_url": r.get('repo_url', ''),
+                        "file_path": r.get('file_path', ''),
+                        "line_number": r.get('line_number'),
+                        "providers": analysis.get('providers', []),
+                        "base_urls": analysis.get('base_urls', []),
+                        "models": analysis.get('models', []),
+                        "confidence": r.get('confidence', 'unknown')
+                    }
+                    json_data.append(entry)
+
+                f.write(json.dumps(json_data, ensure_ascii=False, indent=2))
+                f.write("\n\n")
+
+            # 报告尾
+            f.write("╔" + "═" * 78 + "╗\n")
+            f.write("║" + " " * 78 + "║\n")
+            f.write("║" + "                 ✅ 密钥报告生成完成 - 请妥善保管密钥信息".ljust(78) + "║\n")
+            f.write("║" + " " * 78 + "║\n")
+            f.write("║" + f"  生成时间: {report_time.strftime('%Y年%m月%d日 %H:%M:%S')}".ljust(78) + "║\n")
+            f.write("║" + f"  报告位置: {filepath}".ljust(78) + "║\n")
+            f.write("║" + " " * 78 + "║\n")
+            f.write("║" + "  ⚠️  警告: 此报告包含完整密钥，请勿公开分享！".ljust(78) + "║\n")
+            f.write("╚" + "═" * 78 + "╝\n")
+
+        return filepath
 
     def _ensure_output_dir(self):
         """确保输出目录存在"""
